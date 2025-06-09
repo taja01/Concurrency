@@ -1,6 +1,6 @@
 ﻿namespace Concurrency.UnitTests
 {
-    internal class AsyncItemValidatorTests
+    internal class ResourceUsageTrackerTests
     {
         private ResourceUsageTracker<string> _validator = null!;
 
