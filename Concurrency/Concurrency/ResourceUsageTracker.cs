@@ -3,52 +3,60 @@ namespace Concurrency
 {
     public sealed class ResourceUsageTracker<TKey> where TKey : notnull
     {
-        // ConcurrentDictionary to track the state of each item (true = in use, false = free).
         private readonly ConcurrentDictionary<TKey, bool> _usedItems;
+        private readonly IEqualityComparer<TKey> _comparer;
 
         /// <summary>
-        /// Initializes the validator.
+        /// Initializes the tracker with an optional custom equality comparer for keys.
         /// </summary>
-        public ResourceUsageTracker()
+        /// <param name="comparer">An equality comparer for keys. Defaults to EqualityComparer<TKey>.Default.</param>
+        public ResourceUsageTracker(IEqualityComparer<TKey>? comparer = null)
         {
-            _usedItems = new ConcurrentDictionary<TKey, bool>();
+            _comparer = comparer ?? EqualityComparer<TKey>.Default;
+            _usedItems = new ConcurrentDictionary<TKey, bool>(_comparer);
         }
 
         /// <summary>
-        /// Validates whether the item is free to use, and marks it as "used" if free.
+        /// Attempts to mark the specified key as "used," if it isn’t already in use.
         /// </summary>
         /// <param name="key">The resource identifier.</param>
-        /// <returns>
-        /// Returns true if the item was free and is now marked as "used".
-        /// Returns false if the item is already in use.
-        /// </returns>
+        /// <returns>True if the key was free and is now marked as "used," otherwise false.</returns>
         public bool TryUseItem(TKey key)
         {
-            // Add the item to the dictionary only if it does not exist (i.e., it's free).
             return _usedItems.TryAdd(key, true);
         }
 
         /// <summary>
-        /// Checks whether an item is already in use.
+        /// Checks if the specified key is currently in use.
         /// </summary>
         /// <param name="key">The resource identifier.</param>
-        /// <returns>True if the item is in use, otherwise false.</returns>
+        /// <returns>True if the key is in use; otherwise false.</returns>
         public bool IsItemUsed(TKey key)
         {
             return _usedItems.TryGetValue(key, out var isUsed) && isUsed;
         }
 
         /// <summary>
-        /// Releases the item, marking it as "free" to use again.
+        /// Releases the specified key, marking it as "free" again.
         /// </summary>
         /// <param name="key">The resource identifier.</param>
-        /// <returns>
-        /// Returns true if the item was successfully released (i.e., found and removed),
-        /// Returns false if the item was not found.
-        /// </returns>
+        /// <returns>True if the key was found and released; otherwise false.</returns>
         public bool ReleaseItem(TKey key)
         {
             return _usedItems.TryRemove(key, out _);
+        }
+
+        /// <summary>
+        /// Gets the total number of resources currently marked as "in use."
+        /// </summary>
+        public int CountUsedItems => _usedItems.Count;
+
+        /// <summary>
+        /// Clears all items, resetting the tracker.
+        /// </summary>
+        public void Clear()
+        {
+            _usedItems.Clear();
         }
     }
 }
