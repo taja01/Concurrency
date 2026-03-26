@@ -9,11 +9,48 @@ namespace Concurrency
     /// <typeparam name="TKey">The type of the key used for locking.</typeparam>
     public sealed class AsyncKeyedLock<TKey> where TKey : notnull
     {
-        private readonly ConcurrentDictionary<TKey, SemaphoreSlim> _gates;
+        private readonly ConcurrentDictionary<TKey, RefCountedSemaphore> _gates;
 
         public AsyncKeyedLock(IEqualityComparer<TKey>? comparer = null)
         {
-            _gates = new ConcurrentDictionary<TKey, SemaphoreSlim>(comparer);
+            _gates = new ConcurrentDictionary<TKey, RefCountedSemaphore>(comparer);
+        }
+
+        /// <summary>
+        /// Acquires a lock for the specified key asynchronously.
+        /// </summary>
+        /// <param name="key">The key to acquire the lock for.</param>
+        /// <param name="token">A cancellation token to observe.</param>
+        /// <returns>An IAsyncDisposable that releases the lock when disposed.</returns>
+        public async ValueTask<IAsyncDisposable> AcquireAsync(
+            TKey key,
+            CancellationToken token = default)
+        {
+            RefCountedSemaphore refCounted;
+
+            while (true)
+            {
+                refCounted = _gates.GetOrAdd(key, _ => new RefCountedSemaphore());
+
+                if (refCounted.TryAddRef())
+                {
+                    break;
+                }
+
+                // Semaphore was disposed, retry
+                _gates.TryRemove(key, out _);
+            }
+
+            try
+            {
+                await refCounted.Semaphore.WaitAsync(token).ConfigureAwait(false);
+                return new Releaser(this, key, refCounted);
+            }
+            catch
+            {
+                refCounted.RemoveRef(_gates, key);
+                throw;
+            }
         }
 
         /// <summary>
@@ -22,61 +59,91 @@ namespace Concurrency
         /// <param name="key">The key to acquire the lock for.</param>
         /// <param name="timeout">The maximum time to wait for the lock.</param>
         /// <param name="token">A cancellation token to observe.</param>
-        /// <returns>An IAsyncDisposable that releases the lock when disposed. Returns null if the lock was not acquired within the timeout or was cancelled.</returns>
+        /// <returns>An IAsyncDisposable that releases the lock when disposed. Returns null if the lock was not acquired.</returns>
         public async ValueTask<IAsyncDisposable?> TryAcquireAsync(
             TKey key,
             TimeSpan timeout,
             CancellationToken token = default)
         {
-            var gate = _gates.GetOrAdd(key, _ => new SemaphoreSlim(1, 1));
+            RefCountedSemaphore refCounted;
 
-            if (!await gate.WaitAsync(timeout, token).ConfigureAwait(false))
+            while (true)
             {
-                return null;
+                refCounted = _gates.GetOrAdd(key, _ => new RefCountedSemaphore());
+
+                if (refCounted.TryAddRef())
+                {
+                    break;
+                }
+
+                _gates.TryRemove(key, out _);
             }
 
-            return new Releaser(this, key, gate);
+            try
+            {
+                if (!await refCounted.Semaphore.WaitAsync(timeout, token).ConfigureAwait(false))
+                {
+                    refCounted.RemoveRef(_gates, key);
+                    return null;
+                }
+
+                return new Releaser(this, key, refCounted);
+            }
+            catch
+            {
+                refCounted.RemoveRef(_gates, key);
+                throw;
+            }
         }
 
-        private void Release(TKey key, SemaphoreSlim gate)
+        private sealed class RefCountedSemaphore
         {
-            gate.Release();
+            public SemaphoreSlim Semaphore { get; }
+            private int _refCount = 1;
+            private int _disposed;
 
-            // Clean up the semaphore if it's no longer in use to conserve resources.
-            if (gate.CurrentCount == 1 && _gates.TryRemove(key, out var removedGate))
+            public RefCountedSemaphore()
             {
-                if (ReferenceEquals(gate, removedGate))
+                Semaphore = new SemaphoreSlim(1, 1);
+            }
+
+            public bool TryAddRef()
+            {
+                int current;
+                do
                 {
-                    removedGate.Dispose();
+                    current = Volatile.Read(ref _refCount);
+                    if (current <= 0) return false;
                 }
-                else
+                while (Interlocked.CompareExchange(ref _refCount, current + 1, current) != current);
+
+                return true;
+            }
+
+            public void RemoveRef(ConcurrentDictionary<TKey, RefCountedSemaphore> gates, TKey key)
+            {
+                if (Interlocked.Decrement(ref _refCount) == 0)
                 {
-                    // This is a rare race condition where the gate for the key was replaced.
-                    // Dispose the one that was actually removed.
-                    removedGate.Dispose();
+                    gates.TryRemove(key, out _);
+
+                    if (Interlocked.Exchange(ref _disposed, 1) == 0)
+                    {
+                        Semaphore.Dispose();
+                    }
                 }
             }
         }
 
-        private sealed class Releaser : IAsyncDisposable
+        private sealed class Releaser(AsyncKeyedLock<TKey> owner, TKey key, AsyncKeyedLock<TKey>.RefCountedSemaphore refCounted) : IAsyncDisposable
         {
-            private readonly AsyncKeyedLock<TKey> _owner;
-            private readonly TKey _key;
-            private readonly SemaphoreSlim _gate;
-            private int _disposed; // 0 for not disposed, 1 for disposed.
-
-            public Releaser(AsyncKeyedLock<TKey> owner, TKey key, SemaphoreSlim gate)
-            {
-                _owner = owner;
-                _key = key;
-                _gate = gate;
-            }
+            private int _disposed;
 
             public ValueTask DisposeAsync()
             {
                 if (Interlocked.Exchange(ref _disposed, 1) == 0)
                 {
-                    _owner.Release(_key, _gate);
+                    refCounted.Semaphore.Release();
+                    refCounted.RemoveRef(owner._gates, key);
                 }
                 return default;
             }
