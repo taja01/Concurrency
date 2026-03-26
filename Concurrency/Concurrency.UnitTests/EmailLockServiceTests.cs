@@ -1,6 +1,5 @@
 ﻿using BaseProject;
 using Concurrency.UnitTests.Implementation;
-using Microsoft.Extensions.DependencyInjection;
 
 namespace Concurrency.UnitTests
 {
@@ -10,7 +9,11 @@ namespace Concurrency.UnitTests
         private EmailLockService _service = null!;
 
         [SetUp]
-        public void SetUp() => _service = base.ServiceProvider.GetRequiredService<EmailLockService>();
+        public void SetUp()
+        {
+            var pool = new AsyncResourcePool<string>(["email1", "email2"]);
+            _service = new EmailLockService(pool);
+        }
 
         [Test]
         public async Task Test()
